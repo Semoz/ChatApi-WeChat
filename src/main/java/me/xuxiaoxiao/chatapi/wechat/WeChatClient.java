@@ -5,14 +5,17 @@ import me.xuxiaoxiao.chatapi.wechat.entity.contact.WXGroup;
 import me.xuxiaoxiao.chatapi.wechat.entity.contact.WXUser;
 import me.xuxiaoxiao.chatapi.wechat.entity.message.*;
 import me.xuxiaoxiao.chatapi.wechat.protocol.*;
+import me.xuxiaoxiao.chatapi.wechat.utils.WXHttpExecutor;
 import me.xuxiaoxiao.xtools.common.XTools;
 import me.xuxiaoxiao.xtools.common.http.XHttpTools;
 import me.xuxiaoxiao.xtools.common.http.executor.impl.XRequest;
+import me.xuxiaoxiao.xtools.common.time.XTimeTools;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.HttpCookie;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -188,6 +191,52 @@ public final class WeChatClient {
             for (RspInit.User user : rspBatchGetContact.ContactList) {
                 wxContacts.putContact(wxAPI.host, user);
             }
+        }
+    }
+
+    /**
+     * 打印Cookie和登录信息
+     */
+    public void dump() {
+        try {
+            XTools.logE(LOG_TAG, "微信用户：" + userMe().name);
+
+            StringBuilder sbCookie = new StringBuilder("Cookie信息：");
+            Field executor = WeChatApi.class.getDeclaredField("httpExecutor");
+            executor.setAccessible(true);
+            Field created = HttpCookie.class.getDeclaredField("whenCreated");
+            created.setAccessible(true);
+            for (HttpCookie cookie : ((WXHttpExecutor) executor.get(wxAPI)).getCookies()) {
+                sbCookie.append("\n\t过期时间：").append(XTools.dateFormat(XTimeTools.FORMAT_YMDHMS, new Date((long) created.get(cookie) + cookie.getMaxAge() * 1000)));
+                sbCookie.append("，键：").append(cookie.getName());
+                sbCookie.append("，值：").append(cookie.getValue());
+            }
+            XTools.logE(LOG_TAG, sbCookie.toString());
+
+            StringBuilder sbLogin = new StringBuilder("登录信息：");
+            sbLogin.append("\n\thost：").append(wxAPI.host);
+            sbLogin.append("\n\tuin：").append(wxAPI.uin);
+            sbLogin.append("\n\tsid：").append(wxAPI.sid);
+            sbLogin.append("\n\tdataTicket：").append(wxAPI.dataTicket);
+            Field uuid = WeChatApi.class.getDeclaredField("uuid");
+            uuid.setAccessible(true);
+            sbLogin.append("\n\tuuid：").append(uuid.get(wxAPI));
+            Field skey = WeChatApi.class.getDeclaredField("skey");
+            skey.setAccessible(true);
+            sbLogin.append("\n\tskey：").append(skey.get(wxAPI));
+            Field passticket = WeChatApi.class.getDeclaredField("passticket");
+            passticket.setAccessible(true);
+            sbLogin.append("\n\tpassticket：").append(passticket.get(wxAPI));
+            Field synckey = WeChatApi.class.getDeclaredField("synckey");
+            synckey.setAccessible(true);
+            sbLogin.append("\n\tsynckey：").append(synckey.get(wxAPI));
+            Field syncCheckKey = WeChatApi.class.getDeclaredField("syncCheckKey");
+            syncCheckKey.setAccessible(true);
+            sbLogin.append("\n\tsyncCheckKey：").append(syncCheckKey.get(wxAPI));
+            XTools.logE(LOG_TAG, sbLogin.toString().replace("%", "%%"));
+
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
@@ -632,6 +681,7 @@ public final class WeChatClient {
          * @param reason 错误原因
          */
         public void onFailure(@Nonnull WeChatClient client, @Nonnull String reason) {
+            client.dump();
         }
 
         /**
@@ -662,6 +712,7 @@ public final class WeChatClient {
          * 模拟网页微信客户端正常退出
          */
         public void onLogout(@Nonnull WeChatClient client) {
+            client.dump();
         }
     }
 
@@ -833,8 +884,11 @@ public final class WeChatClient {
                             //删除群后的任意一条消息触发
                             //被移出群不会触发（会收到一条被移出群的addMsg）
                             for (RspInit.User user : rspSync.DelContactList) {
-                                XTools.logN(LOG_TAG, "删除联系人（%s）", user.UserName);
-                                handleContact(wxContacts.rmvContact(user.UserName), null);
+                                WXContact oldContact = wxContacts.rmvContact(user.UserName);
+                                if (oldContact != null && !XTools.strEmpty(oldContact.name)) {
+                                    XTools.logN(LOG_TAG, "删除联系人（%s）", user.UserName);
+                                    handleContact(oldContact, null);
+                                }
                             }
                         }
                         if (rspSync.ModContactList != null) {
@@ -843,9 +897,21 @@ public final class WeChatClient {
                             //被拉入新群第一条消息触发（同时收到2条addMsg，一条被拉入群，一条聊天消息）
                             //群里有人加入或群里踢人或修改群信息之后第一条信息触发
                             for (RspInit.User user : rspSync.ModContactList) {
-                                XTools.logN(LOG_TAG, "变更联系人（%s）", user.UserName);
                                 //由于在这里获取到的联系人（无论是群还是用户）的信息是不全的，所以使用接口重新获取
-                                handleContact(wxContacts.getContact(user.UserName), fetchContact(user.UserName));
+                                WXContact oldContact = wxContacts.getContact(user.UserName);
+                                if (oldContact != null && XTools.strEmpty(oldContact.name)) {
+                                    wxContacts.rmvContact(user.UserName);
+                                    oldContact = null;
+                                }
+                                WXContact newContact = fetchContact(user.UserName);
+                                if (newContact != null && XTools.strEmpty(newContact.name)) {
+                                    wxContacts.rmvContact(user.UserName);
+                                    newContact = null;
+                                }
+                                if (oldContact != null || newContact != null) {
+                                    XTools.logN(LOG_TAG, "变更联系人（%s）", user.UserName);
+                                    handleContact(oldContact, newContact);
+                                }
                             }
                         }
                         if (rspSync.AddMsgList != null) {
